@@ -3,7 +3,6 @@ from pptx import Presentation
 from pptx.util import Pt
 from pptx.oxml.ns import qn
 from lxml import etree
-import copy
 import os
 from pathlib import Path
 
@@ -48,129 +47,180 @@ def _add_speaker_notes(slide, notes_text: str):
     tf.text = notes_text
 
 
-# Contatore globale per garantire ID univoci tra tutte le slide
-_timing_id_counter = [100]
+# Contatore globale per garantire ID univoci nell'intero documento
+_timing_id_counter = [1]
 
 
-def _next_timing_id() -> int:
+def _next_id() -> int:
+    val = _timing_id_counter[0]
     _timing_id_counter[0] += 1
-    return _timing_id_counter[0]
+    return val
 
 
 def _add_fade_animation(slide):
     """
-    Aggiunge animazioni Fade-In a tutti gli oggetti della slide tramite Open XML.
-    Sostituisce il nodo <p:timing> esistente per evitare duplicati.
-    Usa ID univoci globali per evitare conflitti tra slide diverse.
-    """
-    sp_ids = [str(shape.shape_id) for shape in slide.shapes]
-    if not sp_ids:
-        return
+    Aggiunge animazioni Fade-In (On Click, una per shape) usando la struttura
+    OOXML canonica generata da PowerPoint:
 
-    root_id = _next_timing_id()
-    seq_id = _next_timing_id()
-
-    child_pars = ""
-    for idx, spid in enumerate(sp_ids):
-        ctn_id = _next_timing_id()
-        set_ctn_id = _next_timing_id()
-        anim_ctn_id = _next_timing_id()
-        child_pars += f"""
-        <p:par>
-          <p:cTn id="{ctn_id}" presetID="10" presetClass="entr" presetSubtype="0"
-                 fill="hold" grpId="{idx}" nodeType="clickEffect">
-            <p:stCondLst><p:cond delay="0"/></p:stCondLst>
-            <p:childTnLst>
-              <p:set>
-                <p:cBhvr>
-                  <p:cTn id="{set_ctn_id}" dur="1" fill="hold"/>
-                  <p:tgtEl>
-                    <p:spTgt spid="{spid}"/>
-                  </p:tgtEl>
-                  <p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst>
-                </p:cBhvr>
-                <p:to><p:strVal val="visible"/></p:to>
-              </p:set>
-              <p:animEffect transition="in" filter="fade">
-                <p:cBhvr>
-                  <p:cTn id="{anim_ctn_id}" dur="500"/>
-                  <p:tgtEl>
-                    <p:spTgt spid="{spid}"/>
-                  </p:tgtEl>
-                </p:cBhvr>
-              </p:animEffect>
-            </p:childTnLst>
-          </p:cTn>
-        </p:par>"""
-
-    timing_xml = f"""<p:timing xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
-  <p:tnLst>
-    <p:par>
-      <p:cTn id="{root_id}" dur="indefinite" restart="whenNotActive" nodeType="tmRoot">
-        <p:childTnLst>
-          <p:par>
-            <p:cTn id="{seq_id}" fill="hold">
-              <p:stCondLst><p:cond delay="indefinite"/></p:stCondLst>
+      <p:timing>
+        <p:tnLst>
+          <p:par>                              <- root par, nodeType=tmRoot
+            <p:cTn dur=indefinite>
               <p:childTnLst>
-                {child_pars}
+                <p:seq concurrent=1>          <- sequenza dei click
+                  <p:cTn>
+                    <p:stCondLst delay=indefinite />
+                    <p:childTnLst>
+                      <p:par>                 <- un par per ogni shape
+                        <p:cTn presetID=10 (Fade) nodeType=clickEffect>
+                          <p:stCondLst delay=0 />
+                          <p:childTnLst>
+                            <p:par>
+                              <p:cTn dur=500>
+                                <p:childTnLst>
+                                  <p:animEffect filter=fade />
+                                </p:childTnLst>
+                              </p:cTn>
+                            </p:par>
+                          </p:childTnLst>
+                        </p:cTn>
+                      </p:par>
+                    </p:childTnLst>
+                  </p:cTn>
+                  <p:nextCondLst delay=0 />
+                </p:seq>
               </p:childTnLst>
             </p:cTn>
           </p:par>
-        </p:childTnLst>
-      </p:cTn>
-    </p:par>
-  </p:tnLst>
-  <p:bldLst/>
-</p:timing>"""
+        </p:tnLst>
+        <p:bldLst />
+      </p:timing>
 
-    timing_el = etree.fromstring(timing_xml)
+    Non viene usato <p:set style.visibility> perché non necessario per Fade
+    e causa "ripristino" in alcune versioni di PowerPoint.
+    """
+    P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 
+    sp_ids = [shape.shape_id for shape in slide.shapes]
+    if not sp_ids:
+        return
+
+    # Costruisci i <p:par> di ogni shape (un click effect per shape)
+    click_pars = []
+    for grp_idx, spid in enumerate(sp_ids):
+        par_id      = _next_id()   # id del par esterno (clickEffect)
+        inner_id    = _next_id()   # id del par interno (dur=500)
+        anim_id     = _next_id()   # id del cTn dentro animEffect
+
+        click_par = etree.SubElement(etree.Element("dummy"), f"{{{P}}}par")
+        cTn_click = etree.SubElement(click_par, f"{{{P}}}cTn", {
+            "id":          str(par_id),
+            "presetID":    "10",
+            "presetClass": "entr",
+            "presetSubtype": "0",
+            "fill":        "hold",
+            "grpId":       str(grp_idx),
+            "nodeType":    "clickEffect",
+        })
+        stCond = etree.SubElement(etree.SubElement(cTn_click, f"{{{P}}}stCondLst"), f"{{{P}}}cond")
+        stCond.set("delay", "0")
+
+        childTn = etree.SubElement(cTn_click, f"{{{P}}}childTnLst")
+        inner_par = etree.SubElement(childTn, f"{{{P}}}par")
+        cTn_inner = etree.SubElement(inner_par, f"{{{P}}}cTn", {
+            "id":   str(inner_id),
+            "dur":  "500",
+            "fill": "hold",
+        })
+        inner_child = etree.SubElement(cTn_inner, f"{{{P}}}childTnLst")
+
+        anim = etree.SubElement(inner_child, f"{{{P}}}animEffect", {
+            "transition": "in",
+            "filter":     "fade",
+        })
+        cBhvr = etree.SubElement(anim, f"{{{P}}}cBhvr")
+        etree.SubElement(cBhvr, f"{{{P}}}cTn", {"id": str(anim_id), "dur": "500"})
+        tgtEl = etree.SubElement(cBhvr, f"{{{P}}}tgtEl")
+        etree.SubElement(tgtEl, f"{{{P}}}spTgt", {"spid": str(spid)})
+
+        click_pars.append(click_par)
+
+    # Struttura radice
+    root_id = _next_id()
+    seq_id  = _next_id()
+
+    timing = etree.Element(f"{{{P}}}timing")
+    tnLst  = etree.SubElement(timing, f"{{{P}}}tnLst")
+
+    root_par  = etree.SubElement(tnLst, f"{{{P}}}par")
+    root_cTn  = etree.SubElement(root_par, f"{{{P}}}cTn", {
+        "id":      str(root_id),
+        "dur":     "indefinite",
+        "restart": "whenNotActive",
+        "nodeType": "tmRoot",
+    })
+    root_child = etree.SubElement(root_cTn, f"{{{P}}}childTnLst")
+
+    seq = etree.SubElement(root_child, f"{{{P}}}seq", {"concurrent": "1", "nextAc": "seek"})
+    seq_cTn = etree.SubElement(seq, f"{{{P}}}cTn", {
+        "id":   str(seq_id),
+        "dur":  "indefinite",
+        "nodeType": "mainSeq",
+    })
+    seq_stCond = etree.SubElement(
+        etree.SubElement(seq_cTn, f"{{{P}}}stCondLst"), f"{{{P}}}cond"
+    )
+    seq_stCond.set("delay", "indefinite")
+    seq_child = etree.SubElement(seq_cTn, f"{{{P}}}childTnLst")
+
+    for cp in click_pars:
+        # cp è un <p:par> con un <dummy> come genitore; prendi il primo figlio
+        real_par = cp  # cp stesso è già il <p:par>
+        seq_child.append(real_par)
+
+    # nextCondLst obbligatorio sulla seq
+    next_cond = etree.SubElement(
+        etree.SubElement(seq, f"{{{P}}}nextCondLst"), f"{{{P}}}cond"
+    )
+    next_cond.set("evt", "onNext")
+    next_cond.set("delay", "0")
+
+    etree.SubElement(timing, f"{{{P}}}bldLst")
+
+    # Sostituisci il timing esistente
     sld_el = slide._element
     for old in sld_el.findall(qn("p:timing")):
         sld_el.remove(old)
+    sld_el.append(timing)
 
-    sld_el.append(timing_el)
+
+def _remove_template_slides(prs: Presentation) -> None:
+    """
+    Rimuove tutte le slide presenti nel template in modo sicuro,
+    senza lasciare relazioni orfane nel pacchetto OOXML.
+    """
+    sld_id_lst = prs.slides._sldIdLst
+    for sld_id in reversed(list(sld_id_lst)):
+        rId = sld_id.get(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+        )
+        try:
+            prs.part.drop_rel(rId)
+        except Exception:
+            pass
+        sld_id_lst.remove(sld_id)
 
 
 def _build_presentation(topic: str, slides_content: list[dict]) -> Presentation:
     """
     Costruisce una Presentation partendo dal template.
-    Crea una nuova presentazione copiando solo i layout/theme dal template,
-    senza ereditare le slide esistenti.
     """
-    # Reset del contatore ID ad ogni nuova presentazione
-    _timing_id_counter[0] = 100
+    _timing_id_counter[0] = 1
 
-    # Apri il template per estrarre i layout
-    template_prs = Presentation(TEMPLATE_PATH)
-
-    # Crea una presentazione vuota con le stesse dimensioni del template
     prs = Presentation(TEMPLATE_PATH)
+    _remove_template_slides(prs)
 
-    # Rimuovi le slide presenti nel template in modo sicuro:
-    # iteriamo sugli sldId e li rimuoviamo uno alla volta partendo dall'ultimo
-    sld_id_lst = prs.slides._sldIdLst
-    sld_ids = list(sld_id_lst)
-    for sld_id in reversed(sld_ids):
-        rId = sld_id.get(
-            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
-        )
-        sld_part = prs.part.related_parts.get(rId)
-        if sld_part is not None:
-            # Rimuovi le relazioni della singola slide (es. note, immagini)
-            for rel in list(sld_part.rels.values()):
-                try:
-                    sld_part.drop_rel(rel.reltype)
-                except Exception:
-                    pass
-            # Rimuovi la relazione dalla parte radice
-            try:
-                prs.part.drop_rel(rId)
-            except Exception:
-                pass
-        sld_id_lst.remove(sld_id)
-
-    # ─── Slide 1: Titolo ──────────────────────────────────────
+    # ─── Slide 1: Titolo
     slide_title = _clone_slide(prs, 0)
     _set_placeholder(slide_title, 0, topic, font_size=40)
     _add_speaker_notes(
@@ -180,7 +230,7 @@ def _build_presentation(topic: str, slides_content: list[dict]) -> Presentation:
     )
     _add_fade_animation(slide_title)
 
-    # ─── Slide 2: Agenda ──────────────────────────────────────
+    # ─── Slide 2: Agenda
     slide_agenda = _clone_slide(prs, min(1, len(prs.slide_layouts) - 1))
     _set_placeholder(slide_agenda, 0, "Agenda")
     agenda_items = [f"{i + 1}. {s['title']}" for i, s in enumerate(slides_content)]
@@ -188,12 +238,11 @@ def _build_presentation(topic: str, slides_content: list[dict]) -> Presentation:
     _add_speaker_notes(
         slide_agenda,
         "Ecco gli argomenti che tratteremo oggi: "
-        + ", ".join([s["title"] for s in slides_content])
-        + ".",
+        + ", ".join([s["title"] for s in slides_content]) + ".",
     )
     _add_fade_animation(slide_agenda)
 
-    # ─── Slide 3..N+2: Contenuto ──────────────────────────────
+    # ─── Slide 3..N+2: Contenuto
     for sc in slides_content:
         layout_idx = min(1, len(prs.slide_layouts) - 1)
         slide = _clone_slide(prs, layout_idx)
@@ -204,7 +253,7 @@ def _build_presentation(topic: str, slides_content: list[dict]) -> Presentation:
         _add_speaker_notes(slide, sc.get("notes", ""))
         _add_fade_animation(slide)
 
-    # ─── Ultima Slide: Ringraziamenti ─────────────────────────
+    # ─── Ultima Slide: Ringraziamenti
     slide_thanks = _clone_slide(prs, 0)
     _set_placeholder(slide_thanks, 0, "Grazie!", font_size=48)
     _set_placeholder(
@@ -236,7 +285,7 @@ La presentazione avrà sempre N+3 slide:
   - Slide 3..N+2: Slide di contenuto richieste
   - Slide N+3: Ringraziamenti finali
 
-Ogni slide include animazioni Fade-In e note relatore pronte per essere lette.
+Ogni slide include animazioni Fade-In (On Click) e note relatore pronte per essere lette.
 Il layout grafico viene preso automaticamente da template.pptx.
 
 Convenzioni rispettate:
