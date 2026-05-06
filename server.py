@@ -1,15 +1,10 @@
 from fastmcp import FastMCP
 from pptx import Presentation
-from pptx.util import Inches, Pt, Emu
-from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
+from pptx.util import Pt
 from pptx.oxml.ns import qn
-from pptx.util import Inches, Pt
-import copy
-import os
-import re
-from pathlib import Path
 from lxml import etree
+import os
+from pathlib import Path
 
 TEMPLATE_PATH = os.environ.get("SLIDE_TEMPLATE", "template.pptx")
 
@@ -21,22 +16,25 @@ mcp = FastMCP(
 
 
 # ─────────────────────────────────────────────────────────────
-# Helper: clona layout dal template e applica testo
+# Helpers
 # ─────────────────────────────────────────────────────────────
 
 def _clone_slide(prs: Presentation, layout_index: int = 0):
-    """Aggiunge uno slide clonando il layout specificato."""
+    """Aggiunge una slide usando il layout specificato."""
+    layout_index = min(layout_index, len(prs.slide_layouts) - 1)
     layout = prs.slide_layouts[layout_index]
     return prs.slides.add_slide(layout)
 
 
 def _set_placeholder(slide, ph_idx: int, text: str, font_size: int | None = None):
-    """Imposta il testo di un placeholder per indice."""
+    """Imposta il testo di un placeholder per indice idx."""
     for ph in slide.placeholders:
         if ph.placeholder_format.idx == ph_idx:
-            ph.text = text
+            tf = ph.text_frame
+            tf.clear()
+            tf.text = text
             if font_size:
-                for para in ph.text_frame.paragraphs:
+                for para in tf.paragraphs:
                     for run in para.runs:
                         run.font.size = Pt(font_size)
             return
@@ -51,77 +49,111 @@ def _add_speaker_notes(slide, notes_text: str):
 
 def _add_fade_animation(slide):
     """
-    Aggiunge un'animazione Fade-In (apparizione) a tutti gli oggetti
-    del corpo dello slide tramite Open XML.
+    Aggiunge animazioni Fade-In a tutti gli oggetti della slide tramite Open XML.
+    Sostituisce il nodo <p:timing> esistente per evitare duplicati.
+
+    Genera un blocco timing valido dove ogni shape visibile ottiene
+    un effetto di apparizione (presetID=10 = Fade) al click.
     """
-    spTree = slide.shapes._spTree
-    # timing element
-    nsmap = {
-        'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
-        'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-    }
-    timing_xml = (
-        '<p:timing xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
-        ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
-        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        '<p:tnLst>'
-        '<p:par>'
-        '<p:cTn id="1" dur="indefinite" restart="whenNotActive" nodeType="tmRoot">'
-        '<p:childTnLst>'
-        '<p:par>'
-        '<p:cTn id="2" fill="hold">'
-        '<p:stCondLst><p:cond delay="indefinite"/></p:stCondLst>'
-        '<p:childTnLst>'
-        '<p:par>'
-        '<p:cTn id="3" presetID="10" presetClass="entr" presetSubtype="0"'
-        ' fill="hold" grpId="0" nodeType="clickEffect">'
-        '<p:stCondLst><p:cond delay="0"/></p:stCondLst>'
-        '<p:childTnLst>'
-        '<p:set>'
-        '<p:cBhvr>'
-        '<p:cTn id="4" dur="1" fill="hold"/>'
-        '<p:tgtEl><p:spTgt spid=""/></p:tgtEl>'
-        '<p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst>'
-        '</p:cBhvr>'
-        '<p:to><p:strVal val="visible"/></p:to>'
-        '</p:set>'
-        '</p:childTnLst>'
-        '</p:cTn>'
-        '</p:par>'
-        '</p:childTnLst>'
-        '</p:cTn>'
-        '</p:par>'
-        '</p:childTnLst>'
-        '</p:cTn>'
-        '</p:par>'
-        '</p:tnLst>'
-        '<p:bldLst/>'
-        '</p:timing>'
-    )
+    PPTX_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+
+    # Raccogli gli spid di tutte le shape presenti nella slide
+    sp_ids = []
+    for shape in slide.shapes:
+        sp_id = shape.shape_id
+        sp_ids.append(str(sp_id))
+
+    if not sp_ids:
+        return
+
+    # Costruisci i nodi <p:par> per ogni shape (un effetto fade per shape)
+    child_pars = ""
+    for idx, spid in enumerate(sp_ids):
+        ctn_id_base = 3 + idx * 3
+        child_pars += f"""
+        <p:par>
+          <p:cTn id="{ctn_id_base}" presetID="10" presetClass="entr" presetSubtype="0"
+                 fill="hold" grpId="{idx}" nodeType="clickEffect">
+            <p:stCondLst><p:cond delay="0"/></p:stCondLst>
+            <p:childTnLst>
+              <p:set>
+                <p:cBhvr>
+                  <p:cTn id="{ctn_id_base + 1}" dur="1" fill="hold"/>
+                  <p:tgtEl>
+                    <p:spTgt spid="{spid}"/>
+                  </p:tgtEl>
+                  <p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst>
+                </p:cBhvr>
+                <p:to><p:strVal val="visible"/></p:to>
+              </p:set>
+              <p:animEffect transition="in" filter="fade">
+                <p:cBhvr>
+                  <p:cTn id="{ctn_id_base + 2}" dur="500"/>
+                  <p:tgtEl>
+                    <p:spTgt spid="{spid}"/>
+                  </p:tgtEl>
+                </p:cBhvr>
+              </p:animEffect>
+            </p:childTnLst>
+          </p:cTn>
+        </p:par>"""
+
+    timing_xml = f"""<p:timing xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:tnLst>
+    <p:par>
+      <p:cTn id="1" dur="indefinite" restart="whenNotActive" nodeType="tmRoot">
+        <p:childTnLst>
+          <p:par>
+            <p:cTn id="2" fill="hold">
+              <p:stCondLst><p:cond delay="indefinite"/></p:stCondLst>
+              <p:childTnLst>
+                {child_pars}
+              </p:childTnLst>
+            </p:cTn>
+          </p:par>
+        </p:childTnLst>
+      </p:cTn>
+    </p:par>
+  </p:tnLst>
+  <p:bldLst/>
+</p:timing>"""
+
     timing_el = etree.fromstring(timing_xml)
-    # inserisce timing nello spTree del parent (slide xml)
-    slide._element.append(timing_el)
+
+    # Rimuovi eventuali nodi <p:timing> già presenti per evitare duplicati
+    sld_el = slide._element
+    existing = sld_el.findall(qn("p:timing"))
+    for old in existing:
+        sld_el.remove(old)
+
+    sld_el.append(timing_el)
 
 
-def _build_presentation(
-    topic: str,
-    slides_content: list[dict],
-) -> Presentation:
+def _build_presentation(topic: str, slides_content: list[dict]) -> Presentation:
     """
     Costruisce una Presentation partendo dal template.
-    slides_content: lista di dict con chiavi 'title', 'bullets', 'notes'
+    NON rimuove le slide del template: usa Presentation() che parte già pulito
+    (il template viene usato solo per estrarre i layout/theme).
     """
+    # python-pptx carica i layout dal template; le slide vanno aggiunte ex-novo
     prs = Presentation(TEMPLATE_PATH)
 
-    # rimuovi eventuali slide di esempio già nel template
+    # Svuota le slide già presenti nel template (se ce ne sono)
+    # in modo sicuro: tramite le relazioni del parte slide
     xml_slides = prs.slides._sldIdLst
-    while len(prs.slides) > 0:
-        rId = prs.slides._sldIdLst[0].get('r:id') or prs.slides._sldIdLst[0].get(
-            '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
+    # rimuovi tutti i riferimenti in ordine inverso
+    for sldId in list(xml_slides):
+        rId = sldId.get(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
         )
-        prs.slides._sldIdLst.remove(prs.slides._sldIdLst[0])
+        if rId:
+            try:
+                prs.part.drop_rel(rId)
+            except Exception:
+                pass
+        xml_slides.remove(sldId)
 
-    # ─── Slide 1: Titolo ───────────────────────────────────────
+    # ─── Slide 1: Titolo ──────────────────────────────────────
     slide_title = _clone_slide(prs, 0)
     _set_placeholder(slide_title, 0, topic, font_size=40)
     _add_speaker_notes(
@@ -132,27 +164,25 @@ def _build_presentation(
     _add_fade_animation(slide_title)
 
     # ─── Slide 2: Agenda ──────────────────────────────────────
-    slide_agenda = _clone_slide(prs, 1)
+    slide_agenda = _clone_slide(prs, min(1, len(prs.slide_layouts) - 1))
     _set_placeholder(slide_agenda, 0, "Agenda")
-    agenda_items = [
-        f"{i + 1}. {s['title']}" for i, s in enumerate(slides_content)
-    ]
-    agenda_text = "\n".join(agenda_items)
-    _set_placeholder(slide_agenda, 1, agenda_text, font_size=18)
+    agenda_items = [f"{i + 1}. {s['title']}" for i, s in enumerate(slides_content)]
+    _set_placeholder(slide_agenda, 1, "\n".join(agenda_items), font_size=18)
     _add_speaker_notes(
         slide_agenda,
-        "Ecco gli argomenti che tratteremo oggi. " + ", ".join([s['title'] for s in slides_content]) + ".",
+        "Ecco gli argomenti che tratteremo oggi: "
+        + ", ".join([s["title"] for s in slides_content])
+        + ".",
     )
     _add_fade_animation(slide_agenda)
 
-    # ─── Slide N: Contenuto ───────────────────────────────────
-    for i, sc in enumerate(slides_content):
-        layout_idx = 1 if len(prs.slide_layouts) == 1 else min(1, len(prs.slide_layouts) - 1)
+    # ─── Slide 3..N+2: Contenuto ──────────────────────────────
+    for sc in slides_content:
+        layout_idx = min(1, len(prs.slide_layouts) - 1)
         slide = _clone_slide(prs, layout_idx)
         _set_placeholder(slide, 0, sc["title"])
-
         bullets = sc.get("bullets", [])
-        body_text = "\n".join(f"• {b}" for b in bullets)
+        body_text = "\n".join(f"\u2022 {b}" for b in bullets)
         _set_placeholder(slide, 1, body_text, font_size=18)
         _add_speaker_notes(slide, sc.get("notes", ""))
         _add_fade_animation(slide)
@@ -161,13 +191,15 @@ def _build_presentation(
     slide_thanks = _clone_slide(prs, 0)
     _set_placeholder(slide_thanks, 0, "Grazie!", font_size=48)
     _set_placeholder(
-        slide_thanks, 1,
+        slide_thanks,
+        1,
         "Domande? Siamo felici di rispondere.\n\nContatti: [email] | [LinkedIn]",
         font_size=20,
     )
     _add_speaker_notes(
         slide_thanks,
-        "Grazie mille per la vostra attenzione. Siamo ora disponibili per rispondere a qualsiasi domanda.",
+        "Grazie mille per la vostra attenzione. "
+        "Siamo ora disponibili per rispondere a qualsiasi domanda.",
     )
     _add_fade_animation(slide_thanks)
 
@@ -248,7 +280,6 @@ def generate_presentation(
     Returns:
         Messaggio con il percorso del file generato.
     """
-    # Validazione convenzioni
     errors = []
     for i, s in enumerate(slides):
         title_words = len(s.get("title", "").split())
@@ -276,7 +307,7 @@ def generate_presentation(
 
 
 # ─────────────────────────────────────────────────────────────
-# Tool: lista template disponibili
+# Tool: info template
 # ─────────────────────────────────────────────────────────────
 
 @mcp.tool(
@@ -288,7 +319,7 @@ Few-shot examples
 -----------------
 Esempio 1:
   Input: nessun parametro richiesto
-  Output: "Template: template.pptx | Layout disponibili: 11 | Slide example già presenti: 0"
+  Output: "Template: template.pptx | Layout disponibili: 11 | Slide già presenti: 0"
 
 Esempio 2 (template non trovato):
   Output: "Errore: template.pptx non trovato. Assicurati che il file esista nella directory corrente."
@@ -348,9 +379,9 @@ Esempio 2 – errori rilevati:
     }
   ]
   Output:
-    "❌ Errori trovati:\n"
-    "- Slide 1: titolo ha 12 parole (max 7)\n"
-    "- Slide 1: 6 bullet points (max 5)\n"
+    "❌ Errori trovati:\\n"
+    "- Slide 1: titolo ha 12 parole (max 7)\\n"
+    "- Slide 1: 6 bullet points (max 5)\\n"
     "- Slide 1: note troppo brevi (1 parola, min 10)"
 """
 )
