@@ -60,44 +60,11 @@ def _next_id() -> int:
 def _add_fade_animation(slide):
     """
     Aggiunge animazioni Fade-In (On Click, una per shape) usando la struttura
-    OOXML canonica generata da PowerPoint:
+    OOXML canonica generata da PowerPoint.
 
-      <p:timing>
-        <p:tnLst>
-          <p:par>                              <- root par, nodeType=tmRoot
-            <p:cTn dur=indefinite>
-              <p:childTnLst>
-                <p:seq concurrent=1>          <- sequenza dei click
-                  <p:cTn>
-                    <p:stCondLst delay=indefinite />
-                    <p:childTnLst>
-                      <p:par>                 <- un par per ogni shape
-                        <p:cTn presetID=10 (Fade) nodeType=clickEffect>
-                          <p:stCondLst delay=0 />
-                          <p:childTnLst>
-                            <p:par>
-                              <p:cTn dur=500>
-                                <p:childTnLst>
-                                  <p:animEffect filter=fade />
-                                </p:childTnLst>
-                              </p:cTn>
-                            </p:par>
-                          </p:childTnLst>
-                        </p:cTn>
-                      </p:par>
-                    </p:childTnLst>
-                  </p:cTn>
-                  <p:nextCondLst delay=0 />
-                </p:seq>
-              </p:childTnLst>
-            </p:cTn>
-          </p:par>
-        </p:tnLst>
-        <p:bldLst />
-      </p:timing>
-
-    Non viene usato <p:set style.visibility> perché non necessario per Fade
-    e causa "ripristino" in alcune versioni di PowerPoint.
+    Il nodo root <p:cTn> NON ha l'attributo restart="whenNotActive" perché
+    causerebbe il cosiddetto effetto "ripristino" in PowerPoint (le shape
+    tornano invisibili quando si torna alla slide).
     """
     P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 
@@ -108,19 +75,19 @@ def _add_fade_animation(slide):
     # Costruisci i <p:par> di ogni shape (un click effect per shape)
     click_pars = []
     for grp_idx, spid in enumerate(sp_ids):
-        par_id      = _next_id()   # id del par esterno (clickEffect)
-        inner_id    = _next_id()   # id del par interno (dur=500)
-        anim_id     = _next_id()   # id del cTn dentro animEffect
+        par_id   = _next_id()   # id del par esterno (clickEffect)
+        inner_id = _next_id()   # id del par interno (dur=500)
+        anim_id  = _next_id()   # id del cTn dentro animEffect
 
-        click_par = etree.SubElement(etree.Element("dummy"), f"{{{P}}}par")
+        click_par = etree.Element(f"{{{P}}}par")
         cTn_click = etree.SubElement(click_par, f"{{{P}}}cTn", {
-            "id":          str(par_id),
-            "presetID":    "10",
-            "presetClass": "entr",
+            "id":            str(par_id),
+            "presetID":      "10",
+            "presetClass":   "entr",
             "presetSubtype": "0",
-            "fill":        "hold",
-            "grpId":       str(grp_idx),
-            "nodeType":    "clickEffect",
+            "fill":          "hold",
+            "grpId":         str(grp_idx),
+            "nodeType":      "clickEffect",
         })
         stCond = etree.SubElement(etree.SubElement(cTn_click, f"{{{P}}}stCondLst"), f"{{{P}}}cond")
         stCond.set("delay", "0")
@@ -152,19 +119,19 @@ def _add_fade_animation(slide):
     timing = etree.Element(f"{{{P}}}timing")
     tnLst  = etree.SubElement(timing, f"{{{P}}}tnLst")
 
-    root_par  = etree.SubElement(tnLst, f"{{{P}}}par")
-    root_cTn  = etree.SubElement(root_par, f"{{{P}}}cTn", {
-        "id":      str(root_id),
-        "dur":     "indefinite",
-        "restart": "whenNotActive",
+    root_par = etree.SubElement(tnLst, f"{{{P}}}par")
+    # NOTA: restart="whenNotActive" rimosso — causava l'effetto "ripristino"
+    root_cTn = etree.SubElement(root_par, f"{{{P}}}cTn", {
+        "id":       str(root_id),
+        "dur":      "indefinite",
         "nodeType": "tmRoot",
     })
     root_child = etree.SubElement(root_cTn, f"{{{P}}}childTnLst")
 
     seq = etree.SubElement(root_child, f"{{{P}}}seq", {"concurrent": "1", "nextAc": "seek"})
     seq_cTn = etree.SubElement(seq, f"{{{P}}}cTn", {
-        "id":   str(seq_id),
-        "dur":  "indefinite",
+        "id":       str(seq_id),
+        "dur":      "indefinite",
         "nodeType": "mainSeq",
     })
     seq_stCond = etree.SubElement(
@@ -174,9 +141,7 @@ def _add_fade_animation(slide):
     seq_child = etree.SubElement(seq_cTn, f"{{{P}}}childTnLst")
 
     for cp in click_pars:
-        # cp è un <p:par> con un <dummy> come genitore; prendi il primo figlio
-        real_par = cp  # cp stesso è già il <p:par>
-        seq_child.append(real_par)
+        seq_child.append(cp)
 
     # nextCondLst obbligatorio sulla seq
     next_cond = etree.SubElement(
