@@ -62,17 +62,16 @@ def _add_fade_animation(slide):
     Aggiunge animazioni Fade-In (On Click, una per shape) usando la struttura
     OOXML canonica generata da PowerPoint 2019/365.
 
-    Struttura corretta per evitare il "ripristino":
+    FIX RIPRISTINO: la causa del problema "PowerPoint vuole ripristinare"
+    era l'assenza del blocco <p:bldLst> popolato con un <p:bldP> per ogni
+    shape animata. Senza <p:bldP>, PowerPoint non registra le shape nel
+    "build list" della slide e alla riapertura non sa che devono partire
+    invisibili — quindi le "ripristina" allo stato visibile bypassando
+    l'animazione e corrompendo lo stato del timing tree.
 
-    - root_cTn ha fill="hold": mantiene lo stato finale del timing tree
-      quando si esce e rientra nella slide.
-    - Ogni click effect è wrappato in un <p:par> esterno con fill="hold"
-      e stCondLst evt="onClick": questo è il meccanismo che dice a PowerPoint
-      "congela questo stato dopo il click" invece di resettarlo.
-
-    Senza fill="hold" sul root_cTn e sul wrapper esterno, PowerPoint
-    ricomincia il timing tree da zero ad ogni accesso alla slide,
-    causando il comportamento di "ripristino" (shape tornano invisibili).
+    Ogni <p:bldP spid="..." uiExpand="1" grpId="N" animBg="1"/> dice
+    esplicitamente a PowerPoint: "questa shape appartiene al gruppo N
+    di animazione, deve partire nascosta e diventare visibile on-click".
     """
     P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 
@@ -80,7 +79,6 @@ def _add_fade_animation(slide):
     if not sp_ids:
         return
 
-    # Struttura radice
     root_id = _next_id()
     seq_id  = _next_id()
 
@@ -88,9 +86,6 @@ def _add_fade_animation(slide):
     tnLst  = etree.SubElement(timing, f"{{{P}}}tnLst")
 
     root_par = etree.SubElement(tnLst, f"{{{P}}}par")
-    # fill="hold" sul root_cTn: FONDAMENTALE per evitare il ripristino.
-    # Dice a PPT di mantenere lo stato finale del timing tree invece di
-    # resettarlo quando si torna sulla slide.
     root_cTn = etree.SubElement(root_par, f"{{{P}}}cTn", {
         "id":       str(root_id),
         "dur":      "indefinite",
@@ -111,15 +106,12 @@ def _add_fade_animation(slide):
     seq_stCond.set("delay", "indefinite")
     seq_child = etree.SubElement(seq_cTn, f"{{{P}}}childTnLst")
 
-    # Costruisci i <p:par> di ogni shape (un click effect per shape)
     for grp_idx, spid in enumerate(sp_ids):
-        outer_id = _next_id()   # id del wrapper esterno (fill=hold, onClick)
-        par_id   = _next_id()   # id del par clickEffect
-        inner_id = _next_id()   # id del par interno (dur=500)
-        anim_id  = _next_id()   # id del cTn dentro animEffect
+        outer_id = _next_id()
+        par_id   = _next_id()
+        inner_id = _next_id()
+        anim_id  = _next_id()
 
-        # Wrapper esterno: <p:par> con fill="hold" e stCond evt="onClick"
-        # Questo è il layer che "congela" lo stato dopo il click.
         outer_par = etree.SubElement(seq_child, f"{{{P}}}par")
         outer_cTn = etree.SubElement(outer_par, f"{{{P}}}cTn", {
             "id":   str(outer_id),
@@ -132,7 +124,6 @@ def _add_fade_animation(slide):
         outer_stCond.set("delay", "0")
         outer_child = etree.SubElement(outer_cTn, f"{{{P}}}childTnLst")
 
-        # Nodo clickEffect vero e proprio
         click_par = etree.SubElement(outer_child, f"{{{P}}}par")
         cTn_click = etree.SubElement(click_par, f"{{{P}}}cTn", {
             "id":            str(par_id),
@@ -171,7 +162,26 @@ def _add_fade_animation(slide):
     next_cond.set("evt",   "onNext")
     next_cond.set("delay", "0")
 
-    etree.SubElement(timing, f"{{{P}}}bldLst")
+    # ── FIX PRINCIPALE ──────────────────────────────────────────────────────
+    # Popola <p:bldLst> con un <p:bldP> per ogni shape animata.
+    # Senza questo blocco PowerPoint non registra le shape nel "build list"
+    # della slide e alla riapertura le "ripristina" allo stato visibile,
+    # causando il prompt di ripristino e il salto delle animazioni.
+    #
+    # Attributi obbligatori:
+    #   spid     → shape id (stesso usato in spTgt)
+    #   grpId    → indice del gruppo (uguale al grp_idx del clickEffect)
+    #   uiExpand → "1" indica che il build è espanso nel pannello animazioni
+    #   animBg   → "1" indica che lo sfondo partecipa all'animazione
+    # ────────────────────────────────────────────────────────────────────────
+    bldLst = etree.SubElement(timing, f"{{{P}}}bldLst")
+    for grp_idx, spid in enumerate(sp_ids):
+        etree.SubElement(bldLst, f"{{{P}}}bldP", {
+            "spid":     str(spid),
+            "grpId":    str(grp_idx),
+            "uiExpand": "1",
+            "animBg":   "1",
+        })
 
     # Sostituisci il timing esistente
     sld_el = slide._element
