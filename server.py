@@ -62,16 +62,15 @@ def _add_fade_animation(slide):
     Aggiunge animazioni Fade-In (On Click, una per shape) usando la struttura
     OOXML canonica generata da PowerPoint 2019/365.
 
-    FIX RIPRISTINO: la causa del problema "PowerPoint vuole ripristinare"
-    era l'assenza del blocco <p:bldLst> popolato con un <p:bldP> per ogni
-    shape animata. Senza <p:bldP>, PowerPoint non registra le shape nel
-    "build list" della slide e alla riapertura non sa che devono partire
-    invisibili — quindi le "ripristina" allo stato visibile bypassando
-    l'animazione e corrompendo lo stato del timing tree.
-
-    Ogni <p:bldP spid="..." uiExpand="1" grpId="N" animBg="1"/> dice
-    esplicitamente a PowerPoint: "questa shape appartiene al gruppo N
-    di animazione, deve partire nascosta e diventare visibile on-click".
+    Struttura per ogni shape:
+      1. <p:set> con visibility="hidden" PRIMA del fade:
+         nasconde la shape quando la slide si apre, in modo che
+         il fade parta davvero da trasparente e sia visibile.
+      2. <p:animEffect transition="in" filter="fade"> con dur=500ms:
+         l'animazione vera e propria, triggerata on-click.
+      3. <p:bldP> nel <p:bldLst>:
+         registra la shape nel build list della slide, evitando
+         il prompt di ripristino di PowerPoint.
     """
     P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 
@@ -94,6 +93,44 @@ def _add_fade_animation(slide):
     })
     root_child = etree.SubElement(root_cTn, f"{{{P}}}childTnLst")
 
+    # --- Blocco 1: p:set iniziale che nasconde TUTTE le shape prima del click
+    # Questo blocco parte automaticamente (delay=0, senza onClick) appena
+    # la slide diventa attiva, rendendo invisibili tutte le shape animate.
+    # Senza di esso le shape sono gia' visibili e il fade non si vede.
+    hide_par = etree.SubElement(root_child, f"{{{P}}}par")
+    hide_cTn = etree.SubElement(hide_par, f"{{{P}}}cTn", {
+        "id":   str(_next_id()),
+        "fill": "hold",
+    })
+    hide_stCond = etree.SubElement(
+        etree.SubElement(hide_cTn, f"{{{P}}}stCondLst"), f"{{{P}}}cond"
+    )
+    hide_stCond.set("delay", "0")
+    hide_child = etree.SubElement(hide_cTn, f"{{{P}}}childTnLst")
+
+    for spid in sp_ids:
+        set_par = etree.SubElement(hide_child, f"{{{P}}}par")
+        set_cTn = etree.SubElement(set_par, f"{{{P}}}cTn", {
+            "id":  str(_next_id()),
+            "dur": "1",
+            "fill": "hold",
+        })
+        etree.SubElement(
+            etree.SubElement(set_cTn, f"{{{P}}}stCondLst"), f"{{{P}}}cond"
+        ).set("delay", "0")
+        set_child = etree.SubElement(set_cTn, f"{{{P}}}childTnLst")
+
+        p_set = etree.SubElement(set_child, f"{{{P}}}set")
+        set_cBhvr = etree.SubElement(p_set, f"{{{P}}}cBhvr")
+        etree.SubElement(set_cBhvr, f"{{{P}}}cTn", {"id": str(_next_id()), "dur": "1", "fill": "hold"})
+        set_tgtEl = etree.SubElement(set_cBhvr, f"{{{P}}}tgtEl")
+        etree.SubElement(set_tgtEl, f"{{{P}}}spTgt", {"spid": str(spid)})
+        set_attrNameLst = etree.SubElement(set_cBhvr, f"{{{P}}}attrNameLst")
+        etree.SubElement(set_attrNameLst, f"{{{P}}}attrName").text = "style.visibility"
+        set_to = etree.SubElement(p_set, f"{{{P}}}to")
+        etree.SubElement(set_to, f"{{{P}}}strVal", {{"val": "hidden"}})
+
+    # --- Blocco 2: sequenza principale con un clickEffect (fade) per shape
     seq = etree.SubElement(root_child, f"{{{P}}}seq", {"concurrent": "1", "nextAc": "seek"})
     seq_cTn = etree.SubElement(seq, f"{{{P}}}cTn", {
         "id":       str(seq_id),
@@ -162,18 +199,8 @@ def _add_fade_animation(slide):
     next_cond.set("evt",   "onNext")
     next_cond.set("delay", "0")
 
-    # ── FIX PRINCIPALE ──────────────────────────────────────────────────────
-    # Popola <p:bldLst> con un <p:bldP> per ogni shape animata.
-    # Senza questo blocco PowerPoint non registra le shape nel "build list"
-    # della slide e alla riapertura le "ripristina" allo stato visibile,
-    # causando il prompt di ripristino e il salto delle animazioni.
-    #
-    # Attributi obbligatori:
-    #   spid     → shape id (stesso usato in spTgt)
-    #   grpId    → indice del gruppo (uguale al grp_idx del clickEffect)
-    #   uiExpand → "1" indica che il build è espanso nel pannello animazioni
-    #   animBg   → "1" indica che lo sfondo partecipa all'animazione
-    # ────────────────────────────────────────────────────────────────────────
+    # --- Blocco 3: bldLst — registra ogni shape nel build list
+    # Necessario per evitare il prompt di ripristino di PowerPoint.
     bldLst = etree.SubElement(timing, f"{{{P}}}bldLst")
     for grp_idx, spid in enumerate(sp_ids):
         etree.SubElement(bldLst, f"{{{P}}}bldP", {
