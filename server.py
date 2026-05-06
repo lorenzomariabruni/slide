@@ -3,6 +3,7 @@ from pptx import Presentation
 from pptx.util import Pt
 from pptx.oxml.ns import qn
 from lxml import etree
+import copy
 import os
 from pathlib import Path
 
@@ -47,38 +48,42 @@ def _add_speaker_notes(slide, notes_text: str):
     tf.text = notes_text
 
 
+# Contatore globale per garantire ID univoci tra tutte le slide
+_timing_id_counter = [100]
+
+
+def _next_timing_id() -> int:
+    _timing_id_counter[0] += 1
+    return _timing_id_counter[0]
+
+
 def _add_fade_animation(slide):
     """
     Aggiunge animazioni Fade-In a tutti gli oggetti della slide tramite Open XML.
     Sostituisce il nodo <p:timing> esistente per evitare duplicati.
-
-    Genera un blocco timing valido dove ogni shape visibile ottiene
-    un effetto di apparizione (presetID=10 = Fade) al click.
+    Usa ID univoci globali per evitare conflitti tra slide diverse.
     """
-    PPTX_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
-
-    # Raccogli gli spid di tutte le shape presenti nella slide
-    sp_ids = []
-    for shape in slide.shapes:
-        sp_id = shape.shape_id
-        sp_ids.append(str(sp_id))
-
+    sp_ids = [str(shape.shape_id) for shape in slide.shapes]
     if not sp_ids:
         return
 
-    # Costruisci i nodi <p:par> per ogni shape (un effetto fade per shape)
+    root_id = _next_timing_id()
+    seq_id = _next_timing_id()
+
     child_pars = ""
     for idx, spid in enumerate(sp_ids):
-        ctn_id_base = 3 + idx * 3
+        ctn_id = _next_timing_id()
+        set_ctn_id = _next_timing_id()
+        anim_ctn_id = _next_timing_id()
         child_pars += f"""
         <p:par>
-          <p:cTn id="{ctn_id_base}" presetID="10" presetClass="entr" presetSubtype="0"
+          <p:cTn id="{ctn_id}" presetID="10" presetClass="entr" presetSubtype="0"
                  fill="hold" grpId="{idx}" nodeType="clickEffect">
             <p:stCondLst><p:cond delay="0"/></p:stCondLst>
             <p:childTnLst>
               <p:set>
                 <p:cBhvr>
-                  <p:cTn id="{ctn_id_base + 1}" dur="1" fill="hold"/>
+                  <p:cTn id="{set_ctn_id}" dur="1" fill="hold"/>
                   <p:tgtEl>
                     <p:spTgt spid="{spid}"/>
                   </p:tgtEl>
@@ -88,7 +93,7 @@ def _add_fade_animation(slide):
               </p:set>
               <p:animEffect transition="in" filter="fade">
                 <p:cBhvr>
-                  <p:cTn id="{ctn_id_base + 2}" dur="500"/>
+                  <p:cTn id="{anim_ctn_id}" dur="500"/>
                   <p:tgtEl>
                     <p:spTgt spid="{spid}"/>
                   </p:tgtEl>
@@ -101,10 +106,10 @@ def _add_fade_animation(slide):
     timing_xml = f"""<p:timing xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
   <p:tnLst>
     <p:par>
-      <p:cTn id="1" dur="indefinite" restart="whenNotActive" nodeType="tmRoot">
+      <p:cTn id="{root_id}" dur="indefinite" restart="whenNotActive" nodeType="tmRoot">
         <p:childTnLst>
           <p:par>
-            <p:cTn id="2" fill="hold">
+            <p:cTn id="{seq_id}" fill="hold">
               <p:stCondLst><p:cond delay="indefinite"/></p:stCondLst>
               <p:childTnLst>
                 {child_pars}
@@ -120,10 +125,8 @@ def _add_fade_animation(slide):
 
     timing_el = etree.fromstring(timing_xml)
 
-    # Rimuovi eventuali nodi <p:timing> già presenti per evitare duplicati
     sld_el = slide._element
-    existing = sld_el.findall(qn("p:timing"))
-    for old in existing:
+    for old in sld_el.findall(qn("p:timing")):
         sld_el.remove(old)
 
     sld_el.append(timing_el)
@@ -132,26 +135,40 @@ def _add_fade_animation(slide):
 def _build_presentation(topic: str, slides_content: list[dict]) -> Presentation:
     """
     Costruisce una Presentation partendo dal template.
-    NON rimuove le slide del template: usa Presentation() che parte già pulito
-    (il template viene usato solo per estrarre i layout/theme).
+    Crea una nuova presentazione copiando solo i layout/theme dal template,
+    senza ereditare le slide esistenti.
     """
-    # python-pptx carica i layout dal template; le slide vanno aggiunte ex-novo
+    # Reset del contatore ID ad ogni nuova presentazione
+    _timing_id_counter[0] = 100
+
+    # Apri il template per estrarre i layout
+    template_prs = Presentation(TEMPLATE_PATH)
+
+    # Crea una presentazione vuota con le stesse dimensioni del template
     prs = Presentation(TEMPLATE_PATH)
 
-    # Svuota le slide già presenti nel template (se ce ne sono)
-    # in modo sicuro: tramite le relazioni del parte slide
-    xml_slides = prs.slides._sldIdLst
-    # rimuovi tutti i riferimenti in ordine inverso
-    for sldId in list(xml_slides):
-        rId = sldId.get(
+    # Rimuovi le slide presenti nel template in modo sicuro:
+    # iteriamo sugli sldId e li rimuoviamo uno alla volta partendo dall'ultimo
+    sld_id_lst = prs.slides._sldIdLst
+    sld_ids = list(sld_id_lst)
+    for sld_id in reversed(sld_ids):
+        rId = sld_id.get(
             "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
         )
-        if rId:
+        sld_part = prs.part.related_parts.get(rId)
+        if sld_part is not None:
+            # Rimuovi le relazioni della singola slide (es. note, immagini)
+            for rel in list(sld_part.rels.values()):
+                try:
+                    sld_part.drop_rel(rel.reltype)
+                except Exception:
+                    pass
+            # Rimuovi la relazione dalla parte radice
             try:
                 prs.part.drop_rel(rId)
             except Exception:
                 pass
-        xml_slides.remove(sldId)
+        sld_id_lst.remove(sld_id)
 
     # ─── Slide 1: Titolo ──────────────────────────────────────
     slide_title = _clone_slide(prs, 0)
