@@ -47,6 +47,37 @@ def _add_speaker_notes(slide, notes_text: str):
     tf.text = notes_text
 
 
+def _add_slide_transition(slide, dur_ms: int = 700):
+    """
+    Aggiunge una transizione Fade tra slide e slide tramite <p:transition>.
+
+    Il tag <p:transition> viene inserito come figlio diretto di <p:sld>,
+    prima di <p:timing> se presente, altrimenti in fondo.
+    dur  = durata del fade in millisecondi (default 700 ms).
+    spd  non viene usato (deprecato in PPTX moderno; si usa dur).
+    """
+    P = "http://schemas.openxmlformats.org/presentationml/2006/main"
+
+    sld_el = slide._element
+
+    # Rimuovi eventuali transizioni già presenti
+    for old in sld_el.findall(qn("p:transition")):
+        sld_el.remove(old)
+
+    transition = etree.Element(f"{{{P}}}transition", {
+        "dur": str(dur_ms),
+    })
+    # <p:fade> è il filtro di transizione Fade nativo di PowerPoint
+    etree.SubElement(transition, f"{{{P}}}fade")
+
+    # Inserisci prima di <p:timing> se esiste, altrimenti in fondo
+    timing_el = sld_el.find(qn("p:timing"))
+    if timing_el is not None:
+        sld_el.insert(list(sld_el).index(timing_el), transition)
+    else:
+        sld_el.append(transition)
+
+
 # Contatore globale per garantire ID univoci nell'intero documento
 _timing_id_counter = [1]
 
@@ -94,9 +125,6 @@ def _add_fade_animation(slide):
     root_child = etree.SubElement(root_cTn, f"{{{P}}}childTnLst")
 
     # --- Blocco 1: p:set iniziale che nasconde TUTTE le shape prima del click
-    # Questo blocco parte automaticamente (delay=0, senza onClick) appena
-    # la slide diventa attiva, rendendo invisibili tutte le shape animate.
-    # Senza di esso le shape sono gia' visibili e il fade non si vede.
     hide_par = etree.SubElement(root_child, f"{{{P}}}par")
     hide_cTn = etree.SubElement(hide_par, f"{{{P}}}cTn", {
         "id":   str(_next_id()),
@@ -128,7 +156,7 @@ def _add_fade_animation(slide):
         set_attrNameLst = etree.SubElement(set_cBhvr, f"{{{P}}}attrNameLst")
         etree.SubElement(set_attrNameLst, f"{{{P}}}attrName").text = "style.visibility"
         set_to = etree.SubElement(p_set, f"{{{P}}}to")
-        etree.SubElement(set_to, f"{{{P}}}strVal", {{"val": "hidden"}})
+        etree.SubElement(set_to, f"{{{P}}}strVal", {"val": "hidden"})
 
     # --- Blocco 2: sequenza principale con un clickEffect (fade) per shape
     seq = etree.SubElement(root_child, f"{{{P}}}seq", {"concurrent": "1", "nextAc": "seek"})
@@ -200,7 +228,6 @@ def _add_fade_animation(slide):
     next_cond.set("delay", "0")
 
     # --- Blocco 3: bldLst — registra ogni shape nel build list
-    # Necessario per evitare il prompt di ripristino di PowerPoint.
     bldLst = etree.SubElement(timing, f"{{{P}}}bldLst")
     for grp_idx, spid in enumerate(sp_ids):
         etree.SubElement(bldLst, f"{{{P}}}bldP", {
@@ -252,6 +279,7 @@ def _build_presentation(topic: str, slides_content: list[dict]) -> Presentation:
         "Introducetevi brevemente e ricordate al pubblico l'obiettivo della presentazione.",
     )
     _add_fade_animation(slide_title)
+    _add_slide_transition(slide_title)
 
     # ─── Slide 2: Agenda
     slide_agenda = _clone_slide(prs, min(1, len(prs.slide_layouts) - 1))
@@ -264,6 +292,7 @@ def _build_presentation(topic: str, slides_content: list[dict]) -> Presentation:
         + ", ".join([s["title"] for s in slides_content]) + ".",
     )
     _add_fade_animation(slide_agenda)
+    _add_slide_transition(slide_agenda)
 
     # ─── Slide 3..N+2: Contenuto
     for sc in slides_content:
@@ -275,6 +304,7 @@ def _build_presentation(topic: str, slides_content: list[dict]) -> Presentation:
         _set_placeholder(slide, 1, body_text, font_size=18)
         _add_speaker_notes(slide, sc.get("notes", ""))
         _add_fade_animation(slide)
+        _add_slide_transition(slide)
 
     # ─── Ultima Slide: Ringraziamenti
     slide_thanks = _clone_slide(prs, 0)
@@ -291,6 +321,7 @@ def _build_presentation(topic: str, slides_content: list[dict]) -> Presentation:
         "Siamo ora disponibili per rispondere a qualsiasi domanda.",
     )
     _add_fade_animation(slide_thanks)
+    _add_slide_transition(slide_thanks)
 
     return prs
 
@@ -308,7 +339,7 @@ La presentazione avrà sempre N+3 slide:
   - Slide 3..N+2: Slide di contenuto richieste
   - Slide N+3: Ringraziamenti finali
 
-Ogni slide include animazioni Fade-In (On Click) e note relatore pronte per essere lette.
+Ogni slide include animazioni Fade-In (On Click), transizione Fade tra slide e slide, e note relatore pronte per essere lette.
 Il layout grafico viene preso automaticamente da template.pptx.
 
 Convenzioni rispettate:
